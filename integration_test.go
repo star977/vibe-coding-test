@@ -28,6 +28,11 @@ type fakeResponder struct {
 	v4, v6   string
 	svcs     []fakeSvc
 
+	// answerOnlyMeta 为真时只应答元查询，对后续的服务类型查询保持沉默。
+	// 这样的目标会耗满整个时间预算（因为元查询有应答，不触发早退），
+	// 用于验证 §9.6-C4：单个慢目标不得拖垮其余地址。
+	answerOnlyMeta bool
+
 	// packetsPerQuery 控制每个查询回几个报文。
 	// 设为 2 可覆盖 §4.3 节点③b 的边界：同一地址可能返回多个报文，
 	// 不能收到第一个就停。
@@ -122,6 +127,10 @@ func (r *fakeResponder) answer(q *dns.Msg, name string) *dns.Msg {
 		return m
 	}
 
+	if r.answerOnlyMeta {
+		return nil // 对非元查询保持沉默
+	}
+
 	for _, s := range r.svcs {
 		svcType := "_" + s.typ + "._tcp.local."
 		if !strings.EqualFold(name, svcType) {
@@ -160,6 +169,26 @@ func (r *fakeResponder) sawQuery(name string) bool {
 		}
 	}
 	return false
+}
+
+// routeByLastOctet 按目标地址的末位字节把 dial 定向到不同的本地端口，
+// 从而在同一次扫描里模拟行为各异的多个目标。
+// 未在映射表中的地址被导向本地一个只收不回的黑洞端口。
+func routeByLastOctet(t *testing.T, ports map[byte]int, fallback int) {
+	t.Helper()
+	orig := dialUDP
+	t.Cleanup(func() { dialUDP = orig })
+	dialUDP = func(network string, laddr, raddr *net.UDPAddr) (*net.UDPConn, error) {
+		v4 := raddr.IP.To4()
+		if v4 == nil {
+			return orig(network, laddr, raddr)
+		}
+		port, ok := ports[v4[3]]
+		if !ok {
+			port = fallback
+		}
+		return orig(network, laddr, &net.UDPAddr{IP: net.ParseIP("127.0.0.1"), Port: port})
+	}
 }
 
 // pointProbesAtFake 把协议端口改指假响应端。

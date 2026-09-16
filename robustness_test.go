@@ -8,6 +8,7 @@ import (
 	"os"
 	"runtime"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -330,5 +331,186 @@ func TestS4OversizedDatagram(t *testing.T) {
 		if m.msg == nil {
 			t.Error("截断的巨型包被当作有效响应收下")
 		}
+	}
+}
+
+// ═══════════════ C4 隔离性 / C7 性能门限 / S7 活动面 ═══════════════
+
+// disableMulticast 关掉组播通道，避免其干扰本组用例的计时与计数。
+func disableMulticast(t *testing.T) {
+	t.Helper()
+	orig := listenUDP
+	t.Cleanup(func() { listenUDP = orig })
+	listenUDP = func(string, *net.UDPAddr) (*net.UDPConn, error) {
+		return nil, errors.New("本用例禁用组播通道")
+	}
+}
+
+// TestC4SlowTargetDoesNotBlockOthers 覆盖 §9.6-C4：
+// 一个地址卡到超时，不得影响其余地址按时完成。
+//
+// 此前该项标注为「未构造黑洞地址专项验证」。这里在同一次扫描里
+// 放两类目标：一个正常应答，一个只答元查询、对后续查询沉默
+// （因此耗满整个预算）。若实现把两者串行化，总耗时会翻倍。
+func TestC4SlowTargetDoesNotBlockOthers(t *testing.T) {
+	disableMulticast(t)
+
+	fast := startFakeResponder(t, nasResponder())
+	stall := nasResponder()
+	stall.answerOnlyMeta = true
+	startFakeResponder(t, stall)
+
+	// .1 → 正常应答，.2 → 滞留
+	routeByLastOctet(t, map[byte]int{1: fast.port, 2: stall.port}, 1)
+
+	const budget = 900 * time.Millisecond
+	_, ipnet, err := net.ParseCIDR("127.0.0.0/30") // 得到 .1 与 .2
+	if err != nil {
+		t.Fatal(err)
+	}
+	targets, err := expandCIDR(ipnet)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := Config{Net: ipnet, PortMin: 1, PortMax: 65535,
+		Timeout: budget, Concurrency: 2}
+
+	var warn bytes.Buffer
+	start := time.Now()
+	groups := probeAll(context.Background(), cfg, targets, &warn)
+	elapsed := time.Since(start)
+
+	// 两个目标并行执行，总耗时应约等于单个预算；
+	// 若被串行化则接近两倍。阈值取 1.6 倍以容忍调度抖动。
+	if elapsed > budget*8/5 {
+		t.Errorf("§9.6-C4：总耗时 %v，单目标预算 %v，滞留目标拖慢了整体",
+			elapsed, budget)
+	}
+	// 正常目标的数据必须照常拿到。
+	if len(groups) == 0 {
+		t.Fatal("正常应答的目标未产出任何响应")
+	}
+	hosts := aggregate(groups, cfg)
+	if len(hosts) == 0 {
+		t.Fatal("未聚合出任何设备")
+	}
+	if !strings.Contains(renderAll(hosts), "5000/tcp qdiscover") {
+		t.Error("§9.6-C4：正常目标的服务数据丢失，被滞留目标影响")
+	}
+}
+
+// TestC7ConcurrencyDoesNotSerialize 为 §9.6-C7 提供一个可复现的性能门限。
+//
+// 真实局域网的耗时依赖环境，无法作为断言。这里把全部 254 个目标
+// 导向本地一个只收不回的黑洞端口：耗时只由并发模型决定，与网络无关，
+// 因此可在任意机器上复现。
+//
+// 若 worker pool 退化为串行，耗时会是 254 × 早退开销，量级在数十秒。
+func TestC7ConcurrencyDoesNotSerialize(t *testing.T) {
+	disableMulticast(t)
+	blackhole := startRawResponder(t, nil, 0) // 只收不回
+	routeByLastOctet(t, nil, blackhole)
+
+	const budget = 300 * time.Millisecond
+	_, ipnet, err := net.ParseCIDR("127.0.0.0/24")
+	if err != nil {
+		t.Fatal(err)
+	}
+	targets, err := expandCIDR(ipnet)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if targets.Len() != 254 {
+		t.Fatalf("目标数 %d，期望 254", targets.Len())
+	}
+	cfg := Config{Net: ipnet, PortMin: 1, PortMax: 65535,
+		Timeout: budget, Concurrency: 256}
+
+	var warn bytes.Buffer
+	start := time.Now()
+	probeAll(context.Background(), cfg, targets, &warn)
+	elapsed := time.Since(start)
+
+	// 254 个目标一批打完，各自早退于预算的 1/3，总耗时应在百毫秒量级。
+	// 门限取 2 秒：既远低于串行化的数十秒，又留足 CI 机器的余量。
+	if elapsed > 2*time.Second {
+		t.Errorf("§9.6-C7：254 个目标耗时 %v，并发模型疑似退化为串行", elapsed)
+	}
+	t.Logf("254 个黑洞目标耗时 %v（预算 %v，门限 2s）", elapsed, budget)
+}
+
+// TestS7OnlyTargetsInsideCIDR 覆盖 §9.5-S7：
+// 仅向 --cidr 指定范围发包，不主动出网。
+//
+// 此前该项标注为「需抓包验证」。改用记录所有 dial 目标的方式——
+// 这比抓包更直接：抓包只能看到实际发出的流量，
+// 而这里断言的是程序**试图**联系的每一个地址。
+func TestS7OnlyTargetsInsideCIDR(t *testing.T) {
+	disableMulticast(t)
+
+	var (
+		mu       sync.Mutex
+		attempts []net.IP
+	)
+	orig := dialUDP
+	t.Cleanup(func() { dialUDP = orig })
+	blackhole := startRawResponder(t, nil, 0)
+	dialUDP = func(network string, laddr, raddr *net.UDPAddr) (*net.UDPConn, error) {
+		mu.Lock()
+		attempts = append(attempts, append(net.IP(nil), raddr.IP...))
+		mu.Unlock()
+		return orig(network, laddr, &net.UDPAddr{IP: net.ParseIP("127.0.0.1"), Port: blackhole})
+	}
+
+	const cidr = "192.168.77.0/29"
+	_, ipnet, err := net.ParseCIDR(cidr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	targets, err := expandCIDR(ipnet)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := Config{Net: ipnet, PortMin: 1, PortMax: 65535,
+		Timeout: 200 * time.Millisecond, Concurrency: 8}
+
+	var warn bytes.Buffer
+	probeAll(context.Background(), cfg, targets, &warn)
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(attempts) == 0 {
+		t.Fatal("未记录到任何 dial 尝试，用例失效")
+	}
+	for _, ip := range attempts {
+		if !ipnet.Contains(ip) {
+			t.Errorf("§9.5-S7：程序试图联系 %s，超出指定网段 %s", ip, cidr)
+		}
+	}
+	// 目标数须与网段展开结果一致：不多打一个，也不漏打一个。
+	if len(attempts) != targets.Len() {
+		t.Errorf("dial 尝试 %d 次，网段内有 %d 个地址，数量应一致",
+			len(attempts), targets.Len())
+	}
+	t.Logf("%d 次 dial 尝试全部落在 %s 内", len(attempts), cidr)
+}
+
+// TestS7MulticastDestinationIsLinkLocal 补齐 §9.5-S7 的另一半：
+// 除网段内地址外，唯一的发包目标是链路本地组播组。
+// 该地址按定义不会被路由器转发，因此不存在「主动出网」。
+func TestS7MulticastDestinationIsLinkLocal(t *testing.T) {
+	if got := mdnsGroupV4.String(); got != "224.0.0.251" {
+		t.Errorf("组播目标为 %s，期望标准的 224.0.0.251", got)
+	}
+	// 224.0.0.0/24 是链路本地组播段，TTL 为 1，不跨路由器。
+	_, linkLocal, err := net.ParseCIDR("224.0.0.0/24")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !linkLocal.Contains(mdnsGroupV4) {
+		t.Errorf("§9.5-S7：组播目标 %s 不在链路本地段内，存在出网风险", mdnsGroupV4)
+	}
+	if mdnsPort != 5353 {
+		t.Errorf("协议端口为 %d，期望 5353", mdnsPort)
 	}
 }
