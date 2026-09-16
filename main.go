@@ -8,6 +8,7 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"os/signal"
@@ -57,7 +58,7 @@ func run() int {
 	}
 
 	// ── 节点③a / ③b 双通道并行探测 ──────────────────
-	groups := probeAll(ctx, cfg, targets)
+	groups := probeAll(ctx, cfg, targets, os.Stderr)
 
 	// ── 节点⑤ 聚合过滤 ──────────────────────────────
 	hosts := aggregate(groups, cfg)
@@ -96,7 +97,10 @@ func buildConfig(cidr, ports string, timeout time.Duration, conc int) (Config, e
 
 // probeAll 并行跑两条探测通道，按响应源地址归组。
 // 规格：§4.3 节点③a、③b；§8.4 两通道并行，耗时不串行叠加。
-func probeAll(ctx context.Context, cfg Config, targets []net.IP) map[string][]recvMsg {
+//
+// warn 接收降级等非致命提示。作为参数而非直接写 os.Stderr，
+// 是为了让测试能断言 §9.4-E9 的降级提示确实发出。
+func probeAll(ctx context.Context, cfg Config, targets []net.IP, warn io.Writer) map[string][]recvMsg {
 	var (
 		mu     sync.Mutex
 		groups = map[string][]recvMsg{}
@@ -117,7 +121,8 @@ func probeAll(ctx context.Context, cfg Config, targets []net.IP) map[string][]re
 		defer wg.Done()
 		ms, err := probeMulticast(cfg.Timeout)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "组播通道不可用，已降级为纯单播: %v\n", err)
+			// §9.4-E9：降级而非中断，单播通道照常完成。
+			fmt.Fprintf(warn, "组播通道不可用，已降级为纯单播: %v\n", err)
 			return
 		}
 		add(ms)

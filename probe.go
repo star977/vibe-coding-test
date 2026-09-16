@@ -19,6 +19,10 @@ const (
 
 var mdnsGroupV4 = net.IPv4(224, 0, 0, 251)
 
+// listenUDP 提取为变量，唯一目的是让测试能注入套接字创建失败，
+// 从而覆盖 §9.4-E9 的组播降级路径——该路径在真实环境里难以构造。
+var listenUDP = net.ListenUDP
+
 // recvMsg 是一条已解包的响应及其来源地址。
 // 组播通道下来源各不相同，故必须随报文一起记录（§4.3 节点 ③a）。
 type recvMsg struct {
@@ -51,7 +55,7 @@ func newUnicastProber(dst net.IP, budget time.Duration) (*prober, error) {
 // 从临时端口向组地址发问即可：按 RFC 6762 §6.7，源端口非 5353 的查询
 // 会得到直接发回本端口的单播响应，因此无需加入组播组。
 func newMulticastProber() (*prober, error) {
-	conn, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4zero, Port: 0})
+	conn, err := listenUDP("udp4", &net.UDPAddr{IP: net.IPv4zero, Port: 0})
 	if err != nil {
 		return nil, err
 	}
