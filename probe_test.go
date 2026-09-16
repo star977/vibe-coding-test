@@ -10,6 +10,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/miekg/dns"
 )
 
 // TestMulticastDegradation 覆盖 §9.4-E9：
@@ -226,5 +228,60 @@ func TestConcurrencyBound(t *testing.T) {
 	}
 	if got < want {
 		t.Errorf("实际并发 %d 未达设定值 %d，worker pool 没打满", got, want)
+	}
+}
+
+// TestSeedTypesOnlyOnMulticast 验证种子服务类型只在组播通道补发。
+//
+// 单播通道按地址逐个发送，若也补种子，查询量会随网段规模放大；
+// 组播整轮只跑一次，补发开销可忽略。
+func TestSeedTypesOnlyOnMulticast(t *testing.T) {
+	unicast := &prober{}                                                 // dst 为 nil
+	multicast := &prober{dst: &net.UDPAddr{IP: mdnsGroupV4, Port: 5353}} // dst 非 nil
+
+	// 元查询无结果时：单播不再发问，组播改发种子类型。
+	if got := unicast.q2Names(nil); len(got) != 0 {
+		t.Errorf("单播通道不应补发种子，实际产生 %d 条查询", len(got))
+	}
+	got := multicast.q2Names(nil)
+	if len(got) != len(seedServiceTypes) {
+		t.Fatalf("组播通道应补发 %d 个种子类型，实际 %d 个",
+			len(seedServiceTypes), len(got))
+	}
+	// 顺序必须与种子表一致，保证查询行为可复现。
+	for i, want := range seedServiceTypes {
+		if got[i] != want {
+			t.Errorf("第 %d 个查询为 %s，期望 %s", i, got[i], want)
+		}
+	}
+}
+
+// TestQ2NamesDeduplicates 确认元查询已覆盖的类型不会被种子重复发送。
+func TestQ2NamesDeduplicates(t *testing.T) {
+	m := new(dns.Msg)
+	m.Answer = []dns.RR{
+		&dns.PTR{
+			Hdr: dns.RR_Header{Name: metaQuery, Rrtype: dns.TypePTR,
+				Class: dns.ClassINET, Ttl: 10},
+			Ptr: "_http._tcp.local.",
+		},
+	}
+	all := []recvMsg{{src: net.ParseIP("192.168.1.1"), msg: m}}
+
+	multicast := &prober{dst: &net.UDPAddr{IP: mdnsGroupV4, Port: 5353}}
+	got := multicast.q2Names(all)
+
+	n := 0
+	for _, g := range got {
+		if strings.EqualFold(g, "_http._tcp.local.") {
+			n++
+		}
+	}
+	if n != 1 {
+		t.Errorf("_http._tcp.local. 被查询 %d 次，应恰好 1 次（种子不得重复）", n)
+	}
+	// 元查询的结果必须排在种子之前。
+	if len(got) == 0 || !strings.EqualFold(got[0], "_http._tcp.local.") {
+		t.Errorf("元查询结果应优先，实际首项为 %v", got)
 	}
 }

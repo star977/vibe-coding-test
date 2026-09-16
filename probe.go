@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"net"
+	"strings"
 	"time"
 
 	"github.com/miekg/dns"
@@ -19,6 +20,30 @@ const (
 )
 
 var mdnsGroupV4 = net.IPv4(224, 0, 0, 251)
+
+// seedServiceTypes 是一组常见服务类型，用作组播通道的补充查询。
+//
+// 起因：并非所有实现都响应 _services._dns-sd._udp 元查询。
+// 这类设备若只靠元查询去问，会被整台漏报。对它们直接询问具体
+// 服务类型通常仍能得到回答。
+//
+// 只在组播通道上发送：组播整轮只跑一次，多发这二十来个查询开销
+// 可忽略；而单播通道要按地址逐个发，代价会随网段规模放大。
+//
+// 注意：这是「问什么」的种子，不是「留什么」的过滤器。
+// 输出侧仍然全量透传设备回答的一切内容，
+// 不违反 §7.5 关于不得硬编码白名单的红线。
+var seedServiceTypes = []string{
+	"_http._tcp.local.", "_https._tcp.local.",
+	"_ssh._tcp.local.", "_sftp-ssh._tcp.local.",
+	"_smb._tcp.local.", "_afpovertcp._tcp.local.", "_nfs._tcp.local.",
+	"_ipp._tcp.local.", "_ipps._tcp.local.", "_printer._tcp.local.",
+	"_pdl-datastream._tcp.local.", "_uscan._tcp.local.",
+	"_airplay._tcp.local.", "_raop._tcp.local.", "_googlecast._tcp.local.",
+	"_device-info._tcp.local.", "_workstation._tcp.local.",
+	"_companion-link._tcp.local.", "_rfb._tcp.local.",
+	"_hap._tcp.local.", "_adisk._tcp.local.", "_qdiscover._tcp.local.",
+}
 
 // 套接字创建提取为变量，供测试注入：
 //   - listenUDP：注入失败以覆盖 §9.4-E9 的组播降级路径
@@ -109,6 +134,32 @@ func (p *prober) collect(until time.Time, out []recvMsg) []recvMsg {
 	return out
 }
 
+// q2Names 计算 Q2 阶段要查询的服务类型，保持确定顺序。
+//
+// 元查询回答的类型优先，其后（仅组播通道）补上种子类型。
+// 抽成独立函数是为了让「种子仅用于组播」这条规则可被测试断言——
+// 否则它埋在网络收发里无法验证。
+func (p *prober) q2Names(all []recvMsg) []string {
+	asked := map[string]bool{}
+	var out []string
+	add := func(t string) {
+		k := strings.ToLower(t)
+		if !asked[k] {
+			asked[k] = true
+			out = append(out, t)
+		}
+	}
+	for _, t := range collectPTRTargets(all, metaQuery) {
+		add(t)
+	}
+	if p.dst != nil { // dst 非空即组播通道
+		for _, t := range seedServiceTypes {
+			add(t)
+		}
+	}
+	return out
+}
+
 // run 执行 DNS-SD 三段式追查。
 // 规格：DESIGN.md §4.3 节点 ③b 的处理列，配合 §8.3「先榨干附加区」。
 //
@@ -136,7 +187,7 @@ func (p *prober) run(ctx context.Context, budget time.Duration) []recvMsg {
 	}
 
 	// Q2：对每个服务类型问「有哪些实例」
-	for _, t := range collectPTRTargets(all, metaQuery) {
+	for _, t := range p.q2Names(all) {
 		_ = p.send(t, dns.TypePTR)
 	}
 	if ctx.Err() != nil {
