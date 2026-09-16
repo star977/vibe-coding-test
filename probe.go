@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"net"
 	"time"
 
@@ -108,7 +109,12 @@ func (p *prober) collect(until time.Time, out []recvMsg) []recvMsg {
 // 规格：DESIGN.md §4.3 节点 ③b 的处理列，配合 §8.3「先榨干附加区」。
 //
 // budget 是本通道的总时间预算，非单次等待（§4.1）。
-func (p *prober) run(budget time.Duration) []recvMsg {
+func (p *prober) run(ctx context.Context, budget time.Duration) []recvMsg {
+	// §9.6-C5 取消传播：ctx 取消时关闭连接，使阻塞中的读立即返回。
+	// 若仅靠读超时，用户按下 Ctrl-C 后仍要等满整个预算才退出——
+	// --timeout 设成 30s 时就是干等 30 秒。
+	defer context.AfterFunc(ctx, func() { _ = p.conn.Close() })()
+
 	start := time.Now()
 	phase := budget / 3
 	var all []recvMsg
@@ -129,12 +135,18 @@ func (p *prober) run(budget time.Duration) []recvMsg {
 	for _, t := range collectPTRTargets(all, metaQuery) {
 		_ = p.send(t, dns.TypePTR)
 	}
+	if ctx.Err() != nil {
+		return all
+	}
 	all = p.collect(start.Add(2*phase), all)
 
 	// Q3：只对仍缺定位记录或描述记录的实例补问（§8.3）。
 	for _, inst := range instancesMissingDetail(all) {
 		_ = p.send(inst, dns.TypeSRV)
 		_ = p.send(inst, dns.TypeTXT)
+	}
+	if ctx.Err() != nil {
+		return all
 	}
 	all = p.collect(start.Add(budget), all)
 
@@ -143,22 +155,22 @@ func (p *prober) run(budget time.Duration) []recvMsg {
 
 // probeUnicast 是节点 ③b 的入口。
 // §9.4-E2：目标不可达或超时一律静默跳过，返回空切片。
-func probeUnicast(dst net.IP, budget time.Duration) []recvMsg {
+func probeUnicast(ctx context.Context, dst net.IP, budget time.Duration) []recvMsg {
 	p, err := newUnicastProber(dst, budget)
 	if err != nil {
 		return nil
 	}
 	defer p.Close()
-	return p.run(budget)
+	return p.run(ctx, budget)
 }
 
 // probeMulticast 是节点 ③a 的入口。
 // §4.3 节点 ③a 失败列：组播不可用时返回 nil，由调用方降级为纯单播。
-func probeMulticast(budget time.Duration) ([]recvMsg, error) {
+func probeMulticast(ctx context.Context, budget time.Duration) ([]recvMsg, error) {
 	p, err := newMulticastProber()
 	if err != nil {
 		return nil, err
 	}
 	defer p.Close()
-	return p.run(budget), nil
+	return p.run(ctx, budget), nil
 }

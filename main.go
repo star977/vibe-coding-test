@@ -119,7 +119,7 @@ func probeAll(ctx context.Context, cfg Config, targets []net.IP, warn io.Writer)
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		ms, err := probeMulticast(cfg.Timeout)
+		ms, err := probeMulticast(ctx, cfg.Timeout)
 		if err != nil {
 			// §9.4-E9：降级而非中断，单播通道照常完成。
 			fmt.Fprintf(warn, "组播通道不可用，已降级为纯单播: %v\n", err)
@@ -145,7 +145,7 @@ func probeAll(ctx context.Context, cfg Config, targets []net.IP, warn io.Writer)
 			go func(ip net.IP) {
 				defer inner.Done()
 				defer func() { <-sem }()
-				if ms := probeUnicast(ip, cfg.Timeout); len(ms) > 0 {
+				if ms := probeUnicast(ctx, ip, cfg.Timeout); len(ms) > 0 {
 					add(ms)
 				}
 			}(ip)

@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"net"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -23,7 +24,7 @@ func TestMulticastDegradation(t *testing.T) {
 	}
 
 	// 其一：probeMulticast 必须如实上报错误，不得吞掉。
-	if _, err := probeMulticast(100 * time.Millisecond); err == nil {
+	if _, err := probeMulticast(context.Background(), 100*time.Millisecond); err == nil {
 		t.Fatal("组播套接字创建失败时，probeMulticast 应返回错误")
 	}
 
@@ -78,4 +79,70 @@ func TestMulticastSuccessIsSilent(t *testing.T) {
 	if strings.Contains(warn.String(), "已降级") {
 		t.Errorf("组播可用时不应输出降级提示，实际输出为 %q", warn.String())
 	}
+}
+
+// TestCancellationPropagates 覆盖 §9.6-C5：
+// 取消后必须迅速收尾，不得等满整个超时预算。
+//
+// 预算故意设为 30s：若取消未能传播到阻塞中的 UDP 读操作，
+// 本用例会实打实地耗时 30 秒。
+func TestCancellationPropagates(t *testing.T) {
+	_, ipnet, err := net.ParseCIDR("198.51.100.0/30")
+	if err != nil {
+		t.Fatal(err)
+	}
+	targets, err := expandCIDR(ipnet)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := Config{Net: ipnet, PortMin: 1, PortMax: 65535,
+		Timeout: 30 * time.Second, Concurrency: 4}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	var warn bytes.Buffer
+	done := make(chan struct{})
+	go func() {
+		probeAll(ctx, cfg, targets, &warn)
+		close(done)
+	}()
+
+	time.Sleep(150 * time.Millisecond) // 让探测真正进入阻塞读
+	start := time.Now()
+	cancel()
+
+	select {
+	case <-done:
+		if el := time.Since(start); el > 3*time.Second {
+			t.Errorf("§9.6-C5：取消后耗时 %v 才收尾，预算为 30s，说明取消未有效传播", el)
+		}
+	case <-time.After(6 * time.Second):
+		t.Fatal("§9.6-C5：取消后 probeAll 未能在 6 秒内收尾")
+	}
+}
+
+// TestNoGoroutineLeak 覆盖 §9.6-C3：探测结束后协程数应回落至基线。
+func TestNoGoroutineLeak(t *testing.T) {
+	_, ipnet, err := net.ParseCIDR("198.51.100.0/29")
+	if err != nil {
+		t.Fatal(err)
+	}
+	targets, err := expandCIDR(ipnet)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := Config{Net: ipnet, PortMin: 1, PortMax: 65535,
+		Timeout: 200 * time.Millisecond, Concurrency: 8}
+
+	baseline := runtime.NumGoroutine()
+	var warn bytes.Buffer
+	probeAll(context.Background(), cfg, targets, &warn)
+
+	// 轮询等待回落：runtime 回收协程有延迟，直接比对会偶发失败。
+	for i := 0; i < 60; i++ {
+		if runtime.NumGoroutine() <= baseline+1 {
+			return
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	t.Errorf("§9.6-C3：协程数未回落，基线 %d，当前 %d", baseline, runtime.NumGoroutine())
 }
