@@ -267,11 +267,14 @@ _device-info._tcp.local
 
 测试文件：
 
-| 文件 | 覆盖范围 |
-|---|---|
-| `scan_test.go` | 多设备聚合、输出格式、端口与网段过滤、确定性、转义 |
-| `probe_test.go` | 组播降级、取消传播、协程泄漏、并发上限、种子查询 |
-| `target_test.go` | 网段展开边界、大网段内存、端口范围解析 |
+| 层次 | 文件 | 覆盖范围 |
+|---|---|---|
+| 单元 | `unit_test.go` | 纯函数：转义还原、名称拆解、排序、过滤、参数构建、渲染金标、记录索引 |
+| 单元 | `target_test.go` | 网段展开边界、大网段内存、端口范围解析 |
+| 组件 | `scan_test.go` | 多设备聚合、输出格式、端口与网段过滤、输出确定性 |
+| 组件 | `probe_test.go` | 组播降级、取消传播、协程泄漏、并发上限、种子查询规则 |
+| 集成 | `integration_test.go` | 经**真实 UDP 套接字**与假响应端验证全链路 |
+| 端到端 | `e2e_test.go` | CLI 契约：进程内调用 `run()`，以及构建二进制后的**真实子进程** |
 
 ## 6. 数据模型
 
@@ -591,11 +594,17 @@ go run -race . --cidr <网段>/24 --ports 1-65535   # 带竞态检测跑一遍
 局域网内若有 NAS、打印机、Apple TV、智能音箱，均会返回结果，
 其中 NAS 与打印机通常携带型号、固件、管理地址，可直接验证 9.2 的深度要求。
 
-**自动化测试**（覆盖范围见 §9.9）：
+**自动化测试**（分层与对应关系见 §9.9）：
 
 ```bash
-go test -race ./...
+go test -race ./...          # 全量，含竞态检测
+go test -cover ./...         # 语句覆盖率
+go test -run Integration ./... # 仅集成层
+go test -run E2E ./...         # 仅端到端层
 ```
+
+集成层会在本地临时端口起一个假响应端，端到端层会先构建二进制，
+两者均不依赖真实局域网环境，可在任意机器上复现。
 
 **三次一致性检查**（同时覆盖 9.2-② 与 9.6-C6）：
 
@@ -625,44 +634,71 @@ diff /tmp/run1.txt /tmp/run2.txt && diff /tmp/run2.txt /tmp/run3.txt && echo "�
 > S1 由面向连接的 UDP 套接字让内核代劳，S2 的描述记录路径由解析库
 > 在解包时自动转义。真正需要动手的只是名称路径的一个字节门槛判断。
 
-### 9.9 验收项与测试的对应关系
+### 9.9 测试分层与验收项对应关系
 
-| 测试 | 覆盖的验收项 |
+语句覆盖率 **95.2%**，48 个用例、98 项断言。唯一未覆盖的是 `main`
+函数体（仅一行 `os.Exit(run())`）。
+
+#### 分层策略
+
+| 层次 | 手段 | 回答的问题 |
+|---|---|---|
+| **单元** | 直接调用纯函数 | 单个函数的边界与异常输入处理是否正确 |
+| **组件** | 在内存中构造已解包的消息 | 多个函数协作的逻辑是否正确 |
+| **集成** | 本地假响应端 + 真实 UDP 套接字 | 收发、报文编解码、三段式问答是否真的可用 |
+| **端到端** | 进程内 `run()` 与真实子进程 | CLI 契约、退出码、流分离是否符合约定 |
+
+分层的意义在于定位：单元层失败指向某个函数，集成层失败指向网络
+或协议处理，端到端层失败指向命令行契约。
+
+#### 对应关系
+
+| 层 | 测试 | 覆盖的验收项 |
+|---|---|---|
+| 单元 | `TestUnescapeName` | §7.3-①、§9.5-S2、§9.3-B18（15 条边界） |
+| 单元 | `TestIsSafeByte` | §9.5-S2 与 §9.3-B18 的门槛判定 |
+| 单元 | `TestSplitInstance` / `TestTypeAndProto` | 名称拆解的异常输入 |
+| 单元 | `TestCompareIP` | C6 主机排序须为数值序 |
+| 单元 | `TestFilterByPort` | F7 及无端口服务保留决策 |
+| 单元 | `TestBuildConfig` | §4.3 节点①，1 组合法 + 8 组非法 |
+| 单元 | `TestRenderHostGolden` | §4.4 格式规则，逐字节金标 |
+| 单元 | `TestRenderHostOmitsMissingFields` | B17 空值行须整行省略 |
+| 单元 | `TestRecordIndexScansAllSections` | §8.3 三个区段一视同仁 |
+| 单元 | `TestInstancesMissingDetail` / `TestCollectPTRTargets` | Q3 补问对象的判定与去重 |
+| 单元 | `TestExpandCIDRBoundaries` 等 4 项 | B1、B2、B3、B4、B7 |
+| 单元 | `TestParsePortRange` | B8–B12 |
+| 组件 | `TestMultiHost` / `TestOutputDetails` | 多设备聚合、F3–F5、F8、§7.3 各条 |
+| 组件 | `TestPortFilterKeepsPortlessService` | §4.3 节点⑤关键决策 |
+| 组件 | `TestCIDRFilterDropsOutOfRange` | B22 组播越界响应源过滤 |
+| 组件 | `TestDeterministicOutput` | C6、§7.3-②（200 次重复渲染） |
+| 组件 | `TestMulticastDegradation` 等 2 项 | E9 降级路径双向 |
+| 组件 | `TestCancellationPropagates` | C5（预算 30s，实测 0.15s 收尾） |
+| 组件 | `TestNoGoroutineLeak` | C3 |
+| 组件 | `TestConcurrencyCap` / `TestConcurrencyBound` | S5、C2 |
+| 组件 | `TestSeedTypesOnlyOnMulticast` 等 2 项 | F12 种子规则与去重 |
+| **集成** | `TestIntegrationUnicastFullStack` | **F3–F6、F9**，经真实 UDP 核对 9 个输出字段 |
+| **集成** | `TestIntegrationMulticastPath` | **F12**，确认种子查询真的发到线缆上 |
+| **集成** | `TestIntegrationCollectsMultiplePackets` | §4.3 节点③b：不得收到首个报文即停 |
+| **集成** | `TestIntegrationSilentTargetCostsLess` | 无响应地址早退优化确实生效 |
+| **集成** | `TestIntegrationMalformedPacketIsSkipped` | **E3** 畸形报文跳过且不 panic |
+| **端到端** | `TestE2EFullFlow` | **F1–F10 综合**，含 stdout 不被提示污染 |
+| **端到端** | `TestE2EPortFilterEndToEnd` | F7 的命令行行为 |
+| **端到端** | `TestE2EEmptyResult` | **E1** 空结果三要素 |
+| **端到端** | `TestE2EParamErrors` | **B5–B14、F10**，10 种非法输入 |
+| **端到端** | `TestE2EUsage` | 帮助信息完整性 |
+| **端到端** | `TestE2EBinaryHelp` 等 5 项 | 真实进程的退出码、未知参数、流分离、不挂死 |
+
+#### 仍无自动化覆盖的验收项
+
+| 验收项 | 现状与原因 |
 |---|---|
-| `TestMultiHost` | 多设备聚合、主机间按 IP 排序（C6 上半） |
-| `TestOutputDetails` | F3–F5、F8、§7.3-①③④⑤、B19、C6 下半 |
-| `TestPortFilterKeepsPortlessService` | F7 及 §4.3 节点⑤的无端口服务保留决策 |
-| `TestCIDRFilterDropsOutOfRange` | B22 组播越界响应源过滤 |
-| `TestDeterministicOutput` | C6、§7.3-②（200 次重复渲染比对） |
-| `TestControlCharactersStayEscaped` | S2、§7.3-①、B18 |
-| `TestMulticastDegradation` | E9 降级路径 |
-| `TestMulticastSuccessIsSilent` | E9 反向确认，避免误报降级 |
-| `TestCancellationPropagates` | C5 取消传播 |
-| `TestNoGoroutineLeak` | C3 协程泄漏 |
-| `TestConcurrencyCap` | S5 并发截断 |
-| `TestConcurrencyBound` | C2 实际并发上限 |
-| `TestSeedTypesOnlyOnMulticast` | F12 种子仅用于组播通道 |
-| `TestQ2NamesDeduplicates` | F12 种子去重与排序优先级 |
-| `TestExpandCIDRBoundaries` | B1、B2、B3 网段展开边界 |
-| `TestExpandCIDRCount` | B3 /24 地址数 |
-| `TestLargeCIDRIsConstantMemory` | B4 大网段常量级内存 |
-| `TestExpandCIDRRejectsIPv6` | B7 IPv6 明确拒绝 |
-| `TestParsePortRange` | B8–B12 端口范围解析 |
-
-**尚无自动化覆盖的验收项**，依赖手工验收或仍缺验证：
-
-| 验收项 | 现状 |
-|---|---|
-| F1 编译与静态检查 | `go build` / `go vet` / `gofmt`，CI 层面手工执行 |
-| F6 深度标识 | 真实设备实测（拿到型号、版本、设备标识） |
-| F10 退出码 | 命令行手工验证 11 类输入 |
-| C1 无数据竞争 | `go test -race` 全量执行 |
-| C4 单点不拖垮整体 | 未构造黑洞地址专项验证 |
-| C7 性能 | 真实局域网计时，未做自动化门限 |
-| E5、E6 接口不可用 / 无权限 | 未构造 |
-| S3 解析炸弹 | 依赖解析库自身防护，未独立验证 |
-| S4 内存放大 | 仅设上限，未做压力验证 |
-| S7 最小活动面 | 未抓包验证 |
+| C4 单点不拖垮整体 | 未构造黑洞地址做专项验证；worker pool 的结构保证与 C2 的实测间接支撑 |
+| C7 性能门限 | 端到端层仅有「不挂死」兜底，未设可复现的耗时门限——真实耗时依赖网络环境 |
+| E5 / E6 接口不可用、无权限 | 需要特权或特定系统状态，未构造 |
+| S3 解析炸弹 | 依赖解析库自身防护，未独立构造压缩指针环 |
+| S4 内存放大 | 仅设 `maxPacket` 与 `maxMsgPerIP` 两道上限，未做压力验证 |
+| S7 最小活动面 | 需抓包验证，未做 |
+| 真实多设备环境 | 集成层用假响应端覆盖了协议路径，但多台**真实**设备同时响应广播的行为未获实测 |
 
 ## 10. 已知取舍
 
