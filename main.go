@@ -62,6 +62,7 @@ func run() int {
 	portsFlag := flag.String("ports", "1-65535", "端口过滤范围，如 1-10000")
 	timeoutFlag := flag.Duration("timeout", 2*time.Second, "单个地址的总时间预算")
 	concFlag := flag.Int("concurrency", 256, "并发探测数")
+	flag.Usage = usage
 	flag.Parse()
 
 	// ── 节点① 参数解析 ──────────────────────────────
@@ -97,6 +98,38 @@ func run() int {
 	}
 	fmt.Print(renderAll(hosts))
 	return 0
+}
+
+// usage 输出帮助信息。
+// 特意点明「端口范围是过滤器而非扫描范围」——这是本工具最容易
+// 被误解的一点，放在帮助里比只写在文档里更有效。
+func usage() {
+	out := flag.CommandLine.Output()
+	fmt.Fprint(out, `mdnsscan —— 网络资产测绘
+
+给定 IP 网段与端口范围，采集范围内设备主动声明的服务信息，
+含型号、固件版本、管理地址等深度标识字段。
+
+用法:
+  mdnsscan --cidr <网段> [选项]
+
+示例:
+  mdnsscan --cidr 192.168.1.0/24
+  mdnsscan --cidr 192.168.1.0/24 --ports 1-10000
+  mdnsscan --cidr 192.168.1.5/32 --timeout 5s
+
+选项:
+`)
+	flag.PrintDefaults()
+	fmt.Fprint(out, `
+说明:
+  --ports 是对发现结果的过滤范围，不是扫描范围。设备的端口由其
+  自身声明，本工具不做端口探测，不发起 TCP 连接。
+
+  退出码：0 正常（含未发现资产）、2 参数非法。
+
+  本工具仅供在已获授权的网络中进行资产盘点使用。
+`)
 }
 
 func buildConfig(cidr, ports string, timeout time.Duration, conc int) (Config, error) {
