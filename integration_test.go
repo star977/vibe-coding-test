@@ -28,6 +28,11 @@ type fakeResponder struct {
 	v4, v6   string
 	svcs     []fakeSvc
 
+	// bindIP / bindPort 指定监听地址。留空则用 127.0.0.1 与系统分配的端口。
+	// 多设备用例给各响应端绑定不同的环回地址，使它们呈现为不同的源地址。
+	bindIP   string
+	bindPort int
+
 	// answerOnlyMeta 为真时只应答元查询，对后续的服务类型查询保持沉默。
 	// 这样的目标会耗满整个时间预算（因为元查询有应答，不触发早退），
 	// 用于验证 §9.6-C4：单个慢目标不得拖垮其余地址。
@@ -47,9 +52,13 @@ type fakeResponder struct {
 
 func startFakeResponder(t *testing.T, r *fakeResponder) *fakeResponder {
 	t.Helper()
-	conn, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.ParseIP("127.0.0.1"), Port: 0})
+	ip := r.bindIP
+	if ip == "" {
+		ip = "127.0.0.1"
+	}
+	conn, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.ParseIP(ip), Port: r.bindPort})
 	if err != nil {
-		t.Fatalf("假响应端监听失败: %v", err)
+		t.Fatalf("假响应端在 %s:%d 监听失败: %v", ip, r.bindPort, err)
 	}
 	r.conn = conn
 	r.port = conn.LocalAddr().(*net.UDPAddr).Port
