@@ -10,7 +10,6 @@ import (
 )
 
 const (
-	mdnsPort  = 5353
 	metaQuery = "_services._dns-sd._udp.local."
 
 	// §9.5-S4 内存放大防护：单个报文读取上限与单目标报文条数上限。
@@ -18,8 +17,6 @@ const (
 	maxPacket   = 9000
 	maxMsgPerIP = 256
 )
-
-var mdnsGroupV4 = net.IPv4(224, 0, 0, 251)
 
 // seedServiceTypes 是一组常见服务类型，用作组播通道的补充查询。
 //
@@ -51,6 +48,14 @@ var seedServiceTypes = []string{
 var (
 	listenUDP = net.ListenUDP
 	dialUDP   = net.DialUDP
+)
+
+// mdnsPort 与 mdnsGroupV4 是协议固定值，提取为变量供集成测试改指
+// 本地假响应端——这样测试能走真实的套接字收发与报文编解码，
+// 而不必依赖真实组播环境或占用系统 5353 端口。
+var (
+	mdnsPort    = 5353
+	mdnsGroupV4 = net.IPv4(224, 0, 0, 251)
 )
 
 // recvMsg 是一条已解包的响应及其来源地址。
