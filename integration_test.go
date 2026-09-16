@@ -191,7 +191,10 @@ func TestIntegrationUnicastFullStack(t *testing.T) {
 	r := startFakeResponder(t, nasResponder())
 	pointProbesAtFake(t, r)
 
-	msgs := probeUnicast(context.Background(), net.ParseIP("127.0.0.1"), 2*time.Second)
+	msgs, probeErr := probeUnicast(context.Background(), net.ParseIP("127.0.0.1"), 2*time.Second)
+	if probeErr != nil {
+		t.Fatalf("套接字创建失败: %v", probeErr)
+	}
 	if len(msgs) == 0 {
 		t.Fatal("未收到任何响应，真实 UDP 往返失败")
 	}
@@ -279,7 +282,10 @@ func TestIntegrationCollectsMultiplePackets(t *testing.T) {
 	startFakeResponder(t, r)
 	pointProbesAtFake(t, r)
 
-	msgs := probeUnicast(context.Background(), net.ParseIP("127.0.0.1"), 2*time.Second)
+	msgs, probeErr := probeUnicast(context.Background(), net.ParseIP("127.0.0.1"), 2*time.Second)
+	if probeErr != nil {
+		t.Fatalf("套接字创建失败: %v", probeErr)
+	}
 	if len(msgs) < 3 {
 		t.Errorf("每个查询回 3 个报文，实际只收到 %d 个报文，"+
 			"说明收包提前终止", len(msgs))
@@ -296,7 +302,10 @@ func TestIntegrationSilentTargetCostsLess(t *testing.T) {
 
 	const budget = 900 * time.Millisecond
 	start := time.Now()
-	msgs := probeUnicast(context.Background(), net.ParseIP("127.0.0.1"), budget)
+	msgs, probeErr := probeUnicast(context.Background(), net.ParseIP("127.0.0.1"), budget)
+	if probeErr != nil {
+		t.Fatalf("套接字创建失败: %v", probeErr)
+	}
 	elapsed := time.Since(start)
 
 	if len(msgs) != 0 {
@@ -335,7 +344,10 @@ func TestIntegrationMalformedPacketIsSkipped(t *testing.T) {
 	t.Cleanup(func() { mdnsPort = orig })
 
 	// 不得 panic；畸形报文被跳过后结果为空。
-	msgs := probeUnicast(context.Background(), net.ParseIP("127.0.0.1"), 600*time.Millisecond)
+	msgs, probeErr := probeUnicast(context.Background(), net.ParseIP("127.0.0.1"), 600*time.Millisecond)
+	if probeErr != nil {
+		t.Fatalf("套接字创建失败: %v", probeErr)
+	}
 	for _, m := range msgs {
 		if m.msg == nil {
 			t.Error("畸形报文被当作有效响应收下")

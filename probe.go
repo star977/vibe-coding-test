@@ -77,7 +77,7 @@ type prober struct {
 // 使用 DialUDP 而非 ListenUDP 是有意为之：已连接的 UDP socket 由内核
 // 只投递来自该目标地址的报文，等于免费满足 §9.5-S1（响应源伪造防护），
 // 无需在用户态再写一遍源地址校验。
-func newUnicastProber(dst net.IP, budget time.Duration) (*prober, error) {
+func newUnicastProber(dst net.IP) (*prober, error) {
 	conn, err := dialUDP("udp4", nil, &net.UDPAddr{IP: dst, Port: mdnsPort})
 	if err != nil {
 		return nil, err
@@ -214,14 +214,19 @@ func (p *prober) run(ctx context.Context, budget time.Duration) []recvMsg {
 }
 
 // probeUnicast 是节点 ③b 的入口。
-// §9.4-E2：目标不可达或超时一律静默跳过，返回空切片。
-func probeUnicast(ctx context.Context, dst net.IP, budget time.Duration) []recvMsg {
-	p, err := newUnicastProber(dst, budget)
+//
+// 返回的 error 专指**套接字创建失败**，不包括「目标无响应」——
+// 后者按 §9.4-E2 静默跳过，返回空切片且 error 为 nil。
+// 两者必须分开：前者意味着网络不可用，若也静默处理，
+// 接口断开时程序会照常跑完并输出「未发现资产」，
+// 把环境故障伪装成扫描结果（§9.4-E5）。
+func probeUnicast(ctx context.Context, dst net.IP, budget time.Duration) ([]recvMsg, error) {
+	p, err := newUnicastProber(dst)
 	if err != nil {
-		return nil
+		return nil, err
 	}
 	defer p.Close()
-	return p.run(ctx, budget)
+	return p.run(ctx, budget), nil
 }
 
 // probeMulticast 是节点 ③a 的入口。

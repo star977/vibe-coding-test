@@ -14,6 +14,7 @@ import (
 	"os/signal"
 	"sort"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 )
@@ -164,6 +165,13 @@ func probeAll(ctx context.Context, cfg Config, targets ipRange, warn io.Writer) 
 		mu     sync.Mutex
 		groups = map[string][]recvMsg{}
 		wg     sync.WaitGroup
+
+		// §9.4-E5：区分「无人应答」与「根本连不上」。
+		// 前者是正常的扫描结果，后者是环境故障，必须明确告知，
+		// 否则接口断开时程序会照常输出「未发现资产」，让人误以为
+		// 网段里确实没有设备。
+		attempted   atomic.Int64
+		dialFailure atomic.Int64
 	)
 	add := func(ms []recvMsg) {
 		mu.Lock()
@@ -204,7 +212,13 @@ func probeAll(ctx context.Context, cfg Config, targets ipRange, warn io.Writer) 
 			go func(ip net.IP) {
 				defer inner.Done()
 				defer func() { <-sem }()
-				if ms := probeUnicast(ctx, ip, cfg.Timeout); len(ms) > 0 {
+				attempted.Add(1)
+				ms, err := probeUnicast(ctx, ip, cfg.Timeout)
+				if err != nil {
+					dialFailure.Add(1)
+					return
+				}
+				if len(ms) > 0 {
 					add(ms)
 				}
 			}(ip)
@@ -214,6 +228,13 @@ func probeAll(ctx context.Context, cfg Config, targets ipRange, warn io.Writer) 
 	}()
 
 	wg.Wait()
+
+	// 全部地址都连不上，几乎必然是接口或路由问题，而非网段里没有设备。
+	if n := attempted.Load(); n > 0 && dialFailure.Load() == n {
+		fmt.Fprintf(warn,
+			"警告：%d 个地址全部无法建立连接，请检查网络接口与路由——"+
+				"这与「未发现资产」不是一回事\n", n)
+	}
 	return groups
 }
 
