@@ -71,6 +71,11 @@ type recordIndex struct {
 	a    map[string][]string
 	aaaa map[string][]string
 	ttl  map[string]uint32
+
+	// ptrOwners 记录 PTR 所有者名的首次出现顺序。
+	// 凡需遍历 ptr 的地方一律走本切片，绝不直接 range map——
+	// Go 的 map 遍历顺序随机，会让输出在多次运行间漂移（§9.6-C6）。
+	ptrOwners []string
 }
 
 func newRecordIndex() *recordIndex {
@@ -104,6 +109,9 @@ func (ri *recordIndex) index(msgs []recvMsg) {
 				name := strings.ToLower(rr.Header().Name)
 				switch v := rr.(type) {
 				case *dns.PTR:
+					if _, seen := ri.ptr[name]; !seen {
+						ri.ptrOwners = append(ri.ptrOwners, name)
+					}
 					ri.ptr[name] = appendUnique(ri.ptr[name], v.Ptr)
 				case *dns.SRV:
 					if _, ok := ri.srv[name]; !ok {
@@ -143,7 +151,8 @@ func instancesMissingDetail(msgs []recvMsg) []string {
 	ri.index(msgs)
 
 	var out []string
-	for owner, targets := range ri.ptr {
+	for _, owner := range ri.ptrOwners {
+		targets := ri.ptr[owner]
 		if owner == strings.ToLower(metaQuery) {
 			continue // 元查询的目标是服务类型，不是实例
 		}
@@ -196,7 +205,7 @@ func parseHost(src net.IP, msgs []recvMsg) *Host {
 	}
 	// 兜底：部分设备不响应元查询，但直接给出了服务类型的 PTR。
 	if len(h.PTRTypes) == 0 {
-		for owner := range ri.ptr {
+		for _, owner := range ri.ptrOwners {
 			if strings.HasPrefix(owner, "_") && owner != strings.ToLower(metaQuery) {
 				h.PTRTypes = appendUnique(h.PTRTypes, owner)
 			}
