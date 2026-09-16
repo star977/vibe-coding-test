@@ -40,6 +40,3 @@ type Service struct {
 	// 自动成立，无法写错。输出结果完全一致。
 	TXT []string
 }
-
-// hostKey 用于按 IP 聚合（§4.3 节点⑤）。
-func (h *Host) hostKey() string { return h.IP.String() }
