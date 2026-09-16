@@ -68,3 +68,6 @@ target/
 *.db
 tmp/
 .cache/
+
+# 构建产物
+/mdnsscan
