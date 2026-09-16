@@ -8,22 +8,51 @@ import (
 	"strings"
 )
 
-// expandCIDR 把网段展开为待探测地址列表。
+// ipRange 是待探测的地址区间。
+//
+// §9.3-B4：按需生成而非一次性展开进内存。实测展开成切片时
+// /12 网段占 29.4 MB，/8 约需 470 MB；而本结构恒为 8 字节。
+type ipRange struct {
+	first, last uint32
+}
+
+// Len 返回区间内地址数量。
+func (r ipRange) Len() int { return int(r.last-r.first) + 1 }
+
+// ForEach 按序逐个产出地址。fn 返回 false 即提前终止遍历。
+func (r ipRange) ForEach(fn func(net.IP) bool) {
+	for cur := uint64(r.first); cur <= uint64(r.last); cur++ {
+		ip := make(net.IP, 4)
+		binary.BigEndian.PutUint32(ip, uint32(cur))
+		if !fn(ip) {
+			return
+		}
+	}
+}
+
+// Slice 展开为切片，仅供测试与小网段使用。
+func (r ipRange) Slice() []net.IP {
+	out := make([]net.IP, 0, r.Len())
+	r.ForEach(func(ip net.IP) bool { out = append(out, ip); return true })
+	return out
+}
+
+// expandCIDR 把网段解析为待探测地址区间。
 // 规格：DESIGN.md §4.3 节点②。
 //
 // 边界（§9.3-B1/B2/B3）：
 //   - /32 → 返回该地址本身（不可返回空）
 //   - /31 → 返回两个地址，点对点网段无网络/广播地址概念，不得剔除
 //   - 其余 → 剔除网络地址与广播地址
-func expandCIDR(n *net.IPNet) ([]net.IP, error) {
+func expandCIDR(n *net.IPNet) (ipRange, error) {
 	v4 := n.IP.To4()
 	if v4 == nil {
 		// §9.3-B7：IPv6 网段必须明确拒绝，不得静默返回空。
-		return nil, fmt.Errorf("--cidr 暂不支持 IPv6 网段 %q，请传入 IPv4 网段", n.String())
+		return ipRange{}, fmt.Errorf("--cidr 暂不支持 IPv6 网段 %q，请传入 IPv4 网段", n.String())
 	}
 	ones, bits := n.Mask.Size()
 	if bits != 32 {
-		return nil, fmt.Errorf("--cidr 掩码非法: %q", n.String())
+		return ipRange{}, fmt.Errorf("--cidr 掩码非法: %q", n.String())
 	}
 
 	base := binary.BigEndian.Uint32(v4.Mask(n.Mask))
@@ -40,13 +69,7 @@ func expandCIDR(n *net.IPNet) ([]net.IP, error) {
 		last = base + uint32(total-2)
 	}
 
-	out := make([]net.IP, 0, last-first+1)
-	for cur := uint64(first); cur <= uint64(last); cur++ {
-		ip := make(net.IP, 4)
-		binary.BigEndian.PutUint32(ip, uint32(cur))
-		out = append(out, ip)
-	}
-	return out, nil
+	return ipRange{first: first, last: last}, nil
 }
 
 // parsePortRange 解析端口过滤范围。

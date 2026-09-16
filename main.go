@@ -126,7 +126,7 @@ func buildConfig(cidr, ports string, timeout time.Duration, conc int) (Config, e
 //
 // warn 接收降级等非致命提示。作为参数而非直接写 os.Stderr，
 // 是为了让测试能断言 §9.4-E9 的降级提示确实发出。
-func probeAll(ctx context.Context, cfg Config, targets []net.IP, warn io.Writer) map[string][]recvMsg {
+func probeAll(ctx context.Context, cfg Config, targets ipRange, warn io.Writer) map[string][]recvMsg {
 	var (
 		mu     sync.Mutex
 		groups = map[string][]recvMsg{}
@@ -158,13 +158,13 @@ func probeAll(ctx context.Context, cfg Config, targets []net.IP, warn io.Writer)
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		sem := make(chan struct{}, effectiveConcurrency(cfg.Concurrency, len(targets), warn))
+		sem := make(chan struct{}, effectiveConcurrency(cfg.Concurrency, targets.Len(), warn))
 		var inner sync.WaitGroup
-		for _, ip := range targets {
+		// 逐个取地址，不预先展开整个网段（§9.3-B4）。
+		targets.ForEach(func(ip net.IP) bool {
 			select {
 			case <-ctx.Done():
-				inner.Wait()
-				return
+				return false
 			case sem <- struct{}{}:
 			}
 			inner.Add(1)
@@ -175,7 +175,8 @@ func probeAll(ctx context.Context, cfg Config, targets []net.IP, warn io.Writer)
 					add(ms)
 				}
 			}(ip)
-		}
+			return true
+		})
 		inner.Wait()
 	}()
 
