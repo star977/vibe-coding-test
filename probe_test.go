@@ -7,6 +7,7 @@ import (
 	"net"
 	"runtime"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -145,4 +146,85 @@ func TestNoGoroutineLeak(t *testing.T) {
 		time.Sleep(50 * time.Millisecond)
 	}
 	t.Errorf("§9.6-C3：协程数未回落，基线 %d，当前 %d", baseline, runtime.NumGoroutine())
+}
+
+// TestConcurrencyCap 覆盖 §9.5-S5 的并发截断逻辑。
+func TestConcurrencyCap(t *testing.T) {
+	cases := []struct {
+		name          string
+		requested     int
+		targets       int
+		want          int
+		wantTruncated bool
+	}{
+		{"超过硬上限须截断", 100000, 5000, maxConcurrency, true},
+		{"上限内原样保留", 256, 5000, 256, false},
+		{"目标数少于并发数时收敛", 256, 10, 10, false},
+		{"最小值为 1", 1, 100, 1, false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			var warn bytes.Buffer
+			got := effectiveConcurrency(c.requested, c.targets, &warn)
+			if got != c.want {
+				t.Errorf("effectiveConcurrency(%d, %d) = %d，期望 %d",
+					c.requested, c.targets, got, c.want)
+			}
+			truncated := strings.Contains(warn.String(), "已截断")
+			if truncated != c.wantTruncated {
+				t.Errorf("截断提示 = %v，期望 %v（实际输出 %q）",
+					truncated, c.wantTruncated, warn.String())
+			}
+		})
+	}
+}
+
+// TestConcurrencyBound 覆盖 §9.6-C2：实际并发协程数不得超过设定值。
+//
+// 用阻塞桩替换套接字创建：所有通过信号量的协程都会卡在桩里，
+// 此时读取计数即为真实并发数。这样测量精确且不依赖计时。
+func TestConcurrencyBound(t *testing.T) {
+	origDial, origListen := dialUDP, listenUDP
+	t.Cleanup(func() { dialUDP, listenUDP = origDial, origListen })
+
+	// 关掉组播通道，避免其套接字干扰计数。
+	listenUDP = func(string, *net.UDPAddr) (*net.UDPConn, error) {
+		return nil, errors.New("测试中禁用组播")
+	}
+
+	gate := make(chan struct{})
+	var inFlight int64
+	dialUDP = func(string, *net.UDPAddr, *net.UDPAddr) (*net.UDPConn, error) {
+		atomic.AddInt64(&inFlight, 1)
+		<-gate // 卡住，使并发数可被静态观测
+		return nil, errors.New("测试桩")
+	}
+
+	const want = 16
+	_, ipnet, err := net.ParseCIDR("198.51.100.0/24")
+	if err != nil {
+		t.Fatal(err)
+	}
+	targets, err := expandCIDR(ipnet)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := Config{Net: ipnet, PortMin: 1, PortMax: 65535,
+		Timeout: time.Second, Concurrency: want}
+
+	var warn bytes.Buffer
+	done := make(chan struct{})
+	go func() { probeAll(context.Background(), cfg, targets, &warn); close(done) }()
+
+	time.Sleep(300 * time.Millisecond) // 等并发数稳定在上限
+	got := atomic.LoadInt64(&inFlight)
+	close(gate)
+	<-done
+
+	if got > want {
+		t.Errorf("§9.6-C2：实际并发 %d 超过设定值 %d", got, want)
+	}
+	if got < want {
+		t.Errorf("实际并发 %d 未达设定值 %d，worker pool 没打满", got, want)
+	}
 }

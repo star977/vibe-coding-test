@@ -27,7 +27,33 @@ type Config struct {
 	Concurrency int
 }
 
+// maxConcurrency 是并发数的硬上限。
+//
+// §9.5-S5 要求并发受控，避免耗尽文件描述符。仅靠用户自觉不够：
+// --concurrency 100000 配合大网段会同时申请十万个套接字，
+// 在 fd 软限制只有 256 的机器上会导致几乎所有探测失败，
+// 而 probeUnicast 对创建失败是静默跳过的，表现为「扫不到任何东西」
+// 而非明确报错，极难排查。故在此处截断并明确告知。
+const maxConcurrency = 1024
+
 func main() { os.Exit(run()) }
+
+// effectiveConcurrency 计算实际使用的并发数。
+// 超过硬上限时截断并提示；目标数少于并发数时无需开那么多协程。
+func effectiveConcurrency(requested, targetCount int, warn io.Writer) int {
+	conc := requested
+	if conc > maxConcurrency {
+		fmt.Fprintf(warn, "--concurrency %d 超过上限，已截断为 %d\n", requested, maxConcurrency)
+		conc = maxConcurrency
+	}
+	if targetCount > 0 && conc > targetCount {
+		conc = targetCount
+	}
+	if conc < 1 {
+		conc = 1
+	}
+	return conc
+}
 
 // run 按 §4.1 的总流程编排六个节点，返回退出码。
 // §4.1 总出参：正常 0（含无结果），参数非法 2。
@@ -132,7 +158,7 @@ func probeAll(ctx context.Context, cfg Config, targets []net.IP, warn io.Writer)
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		sem := make(chan struct{}, cfg.Concurrency)
+		sem := make(chan struct{}, effectiveConcurrency(cfg.Concurrency, len(targets), warn))
 		var inner sync.WaitGroup
 		for _, ip := range targets {
 			select {

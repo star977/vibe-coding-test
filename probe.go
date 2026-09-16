@@ -20,9 +20,13 @@ const (
 
 var mdnsGroupV4 = net.IPv4(224, 0, 0, 251)
 
-// listenUDP 提取为变量，唯一目的是让测试能注入套接字创建失败，
-// 从而覆盖 §9.4-E9 的组播降级路径——该路径在真实环境里难以构造。
-var listenUDP = net.ListenUDP
+// 套接字创建提取为变量，供测试注入：
+//   - listenUDP：注入失败以覆盖 §9.4-E9 的组播降级路径
+//   - dialUDP：包一层计数器以实测 §9.6-C2 的并发上限是否真的生效
+var (
+	listenUDP = net.ListenUDP
+	dialUDP   = net.DialUDP
+)
 
 // recvMsg 是一条已解包的响应及其来源地址。
 // 组播通道下来源各不相同，故必须随报文一起记录（§4.3 节点 ③a）。
@@ -44,7 +48,7 @@ type prober struct {
 // 只投递来自该目标地址的报文，等于免费满足 §9.5-S1（响应源伪造防护），
 // 无需在用户态再写一遍源地址校验。
 func newUnicastProber(dst net.IP, budget time.Duration) (*prober, error) {
-	conn, err := net.DialUDP("udp4", nil, &net.UDPAddr{IP: dst, Port: mdnsPort})
+	conn, err := dialUDP("udp4", nil, &net.UDPAddr{IP: dst, Port: mdnsPort})
 	if err != nil {
 		return nil, err
 	}
